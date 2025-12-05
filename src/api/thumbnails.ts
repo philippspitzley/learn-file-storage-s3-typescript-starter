@@ -2,8 +2,11 @@ import { getBearerToken, validateJWT } from "../auth";
 import { respondWithJSON } from "./json";
 import { getVideo, updateVideo } from "../db/videos";
 import type { ApiConfig } from "../config";
-import type { BunRequest } from "bun";
+import { file, type BunRequest } from "bun";
 import { BadRequestError, NotFoundError } from "./errors";
+
+import path from "node:path";
+import { getAssetPath, getAssetURL, getFileExt } from "./assets";
 
 const MAX_UPLOAD_SIZE = 10 << 20; // bit-shifting is same as 10 * 1024 * 1024 = 10MB
 
@@ -25,10 +28,14 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new BadRequestError("Thumbnail file is missing.");
   }
 
+  if (thumbnail.type !== "image/png" && thumbnail.type !== "image/jpeg") {
+    throw new BadRequestError("Only png and jpeg files are allowd.");
+  }
+
   if (thumbnail.size > MAX_UPLOAD_SIZE) {
     throw new BadRequestError("Thumbnail size is too big.");
   }
-  const mediaType = thumbnail.type;
+
   const imgData = await thumbnail.arrayBuffer();
   const metaData = getVideo(cfg.db, videoId);
 
@@ -36,8 +43,11 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new NotFoundError("Video metadata not found");
   }
 
-  const thumbnailBuffer = Buffer.from(imgData).toString("base64");
-  const thumbnailURL = `data:${mediaType};base64,${thumbnailBuffer}`;
+  const assetFilename = videoId + getFileExt(thumbnail.type);
+  const assetPath = getAssetPath(cfg, assetFilename);
+  const thumbnailURL = getAssetURL(cfg, assetFilename);
+
+  Bun.write(assetPath, imgData);
 
   metaData.thumbnailURL = thumbnailURL;
 
