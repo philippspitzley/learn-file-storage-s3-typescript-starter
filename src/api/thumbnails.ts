@@ -7,6 +7,7 @@ import { BadRequestError, NotFoundError } from "./errors";
 
 import path from "node:path";
 import { getAssetPath, getAssetURL, getFileExt } from "./assets";
+import { randomBytes } from "node:crypto";
 
 const MAX_UPLOAD_SIZE = 10 << 20; // bit-shifting is same as 10 * 1024 * 1024 = 10MB
 
@@ -29,7 +30,7 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   }
 
   if (thumbnail.type !== "image/png" && thumbnail.type !== "image/jpeg") {
-    throw new BadRequestError("Only png and jpeg files are allowd.");
+    throw new BadRequestError("Only png and jpeg files are allowed.");
   }
 
   if (thumbnail.size > MAX_UPLOAD_SIZE) {
@@ -43,7 +44,10 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
     throw new NotFoundError("Video metadata not found");
   }
 
-  const assetFilename = videoId + getFileExt(thumbnail.type);
+  //const assetFilename = videoId + getFileExt(thumbnail.type);
+  const assetFilename =
+    randomBytes(32).toString("base64url") + getFileExt(thumbnail.type);
+  console.log(assetFilename);
   const assetPath = getAssetPath(cfg, assetFilename);
   const thumbnailURL = getAssetURL(cfg, assetFilename);
 
