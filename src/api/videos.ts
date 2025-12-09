@@ -8,6 +8,8 @@ import { getBearerToken, validateJWT } from "../auth";
 import { getVideo, updateVideo } from "../db/videos";
 import { getAssetPath } from "./assets";
 
+type AspectRatio = "landscape" | "portrait" | "other";
+
 const MAX_UPLOAD_SIZE = 1 << 30; // bit shifting, 1 * 1024 * 1024 * 1024 = 1GB
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
@@ -53,14 +55,15 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const videoData = await video.arrayBuffer();
   const filename = `${randomBytes(32).toString("base64url")}.${video.type.split("/")[1]}`;
   const assetPath = getAssetPath(cfg, filename);
-  const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${filename}`;
 
   // Create temporary file on disk
   const tempFile = Bun.file(assetPath);
   await tempFile.write(videoData);
 
   // Save video in aws bucket
-  const file = cfg.s3Client.file(filename);
+  const aspectRatio = await getVideoAspectRatio(assetPath);
+  const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`;
+  const file = cfg.s3Client.file(`${aspectRatio}/${filename}`);
   await file.write(videoData, { type: "video/mp4" });
 
   // Update db entry
@@ -71,4 +74,45 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   await tempFile.delete();
 
   return respondWithJSON(200, null);
+}
+
+export async function getVideoAspectRatio(
+  filePath: string,
+): Promise<AspectRatio> {
+  const proc = Bun.spawn([
+    "ffprobe",
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=display_aspect_ratio",
+    "-of",
+    "json",
+    filePath,
+  ]);
+
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(
+      `FFprobe failed with exit code ${proc.exitCode}: ${stderr}`,
+    );
+  }
+
+  const output = JSON.parse(stdout);
+
+  if (!output.streams || output.streams.lenght === 0) {
+    throw new Error("No video stream found");
+  }
+
+  const aspectRatio = output.streams[0]["display_aspect_ratio"];
+
+  return aspectRatio === "16:9"
+    ? "landscape"
+    : aspectRatio === "9:16"
+      ? "portrait"
+      : "other";
 }
