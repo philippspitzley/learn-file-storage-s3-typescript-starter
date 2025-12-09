@@ -24,7 +24,6 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const token = getBearerToken(req.headers);
   const userID = validateJWT(token, cfg.jwtSecret);
 
-  // upload video
   console.log("uploading video", videoID, "by user", userID);
 
   const metaData = getVideo(cfg.db, videoID);
@@ -60,11 +59,15 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const tempFile = Bun.file(assetPath);
   await tempFile.write(videoData);
 
+  // Process fast start video
+  const processedFilePath = await processVideoForFastStart(assetPath);
+  const processedTempFile = Bun.file(processedFilePath);
+
   // Save video in aws bucket
-  const aspectRatio = await getVideoAspectRatio(assetPath);
+  const aspectRatio = await getVideoAspectRatio(processedFilePath);
   const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`;
   const file = cfg.s3Client.file(`${aspectRatio}/${filename}`);
-  await file.write(videoData, { type: "video/mp4" });
+  await file.write(processedTempFile, { type: "video/mp4" });
 
   // Update db entry
   metaData.videoURL = videoURL;
@@ -72,6 +75,7 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   // Delete temp video file
   await tempFile.delete();
+  await processedTempFile.delete();
 
   return respondWithJSON(200, null);
 }
@@ -104,7 +108,7 @@ export async function getVideoAspectRatio(
 
   const output = JSON.parse(stdout);
 
-  if (!output.streams || output.streams.lenght === 0) {
+  if (!output.streams || output.streams.length === 0) {
     throw new Error("No video stream found");
   }
 
@@ -115,4 +119,34 @@ export async function getVideoAspectRatio(
     : aspectRatio === "9:16"
       ? "portrait"
       : "other";
+}
+
+export async function processVideoForFastStart(inputFilePath: string) {
+  const outputFilePath = inputFilePath + ".processed";
+  const proc = Bun.spawn(
+    [
+      "ffmpeg",
+      "-i",
+      inputFilePath,
+      "-movflags",
+      "faststart",
+      "-map_metadata",
+      "0",
+      "-codec",
+      "copy",
+      "-f",
+      "mp4",
+      outputFilePath,
+    ],
+    { stderr: "pipe" },
+  );
+
+  const stderr = await new Response(proc.stderr).text();
+
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    throw new Error(`FFmpeg failed with exit code ${proc.exitCode}: ${stderr}`);
+  }
+
+  return outputFilePath;
 }
