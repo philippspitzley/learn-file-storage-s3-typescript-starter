@@ -5,7 +5,7 @@ import type { BunRequest } from "bun";
 import { randomBytes } from "node:crypto";
 import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
-import { getVideo, updateVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import { getAssetPath } from "./assets";
 
 type AspectRatio = "landscape" | "portrait" | "other";
@@ -14,8 +14,7 @@ const MAX_UPLOAD_SIZE = 1 << 30; // bit shifting, 1 * 1024 * 1024 * 1024 = 1GB
 
 export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const { videoId: videoID } = req.params as { videoId?: string };
-  console.log("PARAMS:", req.params);
-  console.log("VIDEO ID:", videoID);
+
   if (!videoID) {
     throw new BadRequestError("Invalid video ID");
   }
@@ -59,25 +58,25 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   const tempFile = Bun.file(assetPath);
   await tempFile.write(videoData);
 
-  // Process fast start video
+  // Create and Process temporary fast start video
   const processedFilePath = await processVideoForFastStart(assetPath);
   const processedTempFile = Bun.file(processedFilePath);
 
-  // Save video in aws bucket
+  // Save fast start video in aws bucket
   const aspectRatio = await getVideoAspectRatio(processedFilePath);
-  const videoURL = `https://${cfg.s3Bucket}.s3.${cfg.s3Region}.amazonaws.com/${aspectRatio}/${filename}`;
-  const file = cfg.s3Client.file(`${aspectRatio}/${filename}`);
-  await file.write(processedTempFile, { type: "video/mp4" });
+  const key = `${aspectRatio}/${filename}`;
+  await uploadVideoToS3(cfg, key, processedTempFile, "video/mp4");
 
   // Update db entry
-  metaData.videoURL = videoURL;
+  metaData.videoURL = key;
   updateVideo(cfg.db, metaData);
 
-  // Delete temp video file
+  // Delete temp video files
   await tempFile.delete();
   await processedTempFile.delete();
 
-  return respondWithJSON(200, null);
+  const signedVideo = dbVideoToSignedVideo(cfg, metaData);
+  return respondWithJSON(200, signedVideo);
 }
 
 export async function getVideoAspectRatio(
@@ -149,4 +148,32 @@ export async function processVideoForFastStart(inputFilePath: string) {
   }
 
   return outputFilePath;
+}
+
+export function generatePresignedURL(
+  cfg: ApiConfig,
+  key: string,
+  expireTime: number,
+) {
+  return cfg.s3Client.presign(key, { expiresIn: expireTime });
+}
+
+export function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
+  if (!video.videoURL) {
+    return video;
+  }
+
+  video.videoURL = generatePresignedURL(cfg, video.videoURL, 3600);
+
+  return video;
+}
+
+export async function uploadVideoToS3(
+  cfg: ApiConfig,
+  key: string,
+  processedFile: Bun.BunFile,
+  contentType: string,
+) {
+  const s3file = cfg.s3Client.file(key, { bucket: cfg.s3Bucket });
+  await s3file.write(processedFile, { type: contentType });
 }
