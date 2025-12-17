@@ -1,12 +1,11 @@
-import { respondWithJSON } from "./json";
-
-import { type ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { randomBytes } from "node:crypto";
-import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
 import { getBearerToken, validateJWT } from "../auth";
+import { type ApiConfig } from "../config";
 import { getVideo, updateVideo, type Video } from "../db/videos";
 import { getAssetPath } from "./assets";
+import { BadRequestError, NotFoundError, UserForbiddenError } from "./errors";
+import { respondWithJSON } from "./json";
 
 type AspectRatio = "landscape" | "portrait" | "other";
 
@@ -25,33 +24,33 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
 
   console.log("uploading video", videoID, "by user", userID);
 
-  const metaData = getVideo(cfg.db, videoID);
+  const video = getVideo(cfg.db, videoID);
 
-  if (!metaData) {
+  if (!video) {
     throw new NotFoundError("Video metadata not found");
   }
 
-  if (metaData.userID !== userID) {
+  if (video.userID !== userID) {
     throw new UserForbiddenError("Your are not allowed to edit this video");
   }
 
   const formData = await req.formData();
-  const video = formData.get("video");
+  const videoFile = formData.get("video");
 
-  if (!(video instanceof File)) {
+  if (!(videoFile instanceof File)) {
     throw new BadRequestError("Video file is missing.");
   }
 
-  if (video.size > MAX_UPLOAD_SIZE) {
+  if (videoFile.size > MAX_UPLOAD_SIZE) {
     throw new BadRequestError("File size exeeds the upload limit.");
   }
 
-  if (video.type !== "video/mp4") {
+  if (videoFile.type !== "video/mp4") {
     throw new BadRequestError("Only mp4 files are allowed.");
   }
 
-  const videoData = await video.arrayBuffer();
-  const filename = `${randomBytes(32).toString("base64url")}.${video.type.split("/")[1]}`;
+  const videoData = await videoFile.arrayBuffer();
+  const filename = `${randomBytes(32).toString("base64url")}.${videoFile.type.split("/")[1]}`;
   const assetPath = getAssetPath(cfg, filename);
 
   // Create temporary file on disk
@@ -68,15 +67,14 @@ export async function handlerUploadVideo(cfg: ApiConfig, req: BunRequest) {
   await uploadVideoToS3(cfg, key, processedTempFile, "video/mp4");
 
   // Update db entry
-  metaData.videoURL = key;
-  updateVideo(cfg.db, metaData);
+  video.videoURL = `${cfg.s3CfDistribution}/${key}`;
+  updateVideo(cfg.db, video);
 
   // Delete temp video files
   await tempFile.delete();
   await processedTempFile.delete();
 
-  const signedVideo = dbVideoToSignedVideo(cfg, metaData);
-  return respondWithJSON(200, signedVideo);
+  return respondWithJSON(200, video);
 }
 
 export async function getVideoAspectRatio(
@@ -148,24 +146,6 @@ export async function processVideoForFastStart(inputFilePath: string) {
   }
 
   return outputFilePath;
-}
-
-export function generatePresignedURL(
-  cfg: ApiConfig,
-  key: string,
-  expireTime: number,
-) {
-  return cfg.s3Client.presign(key, { expiresIn: expireTime });
-}
-
-export function dbVideoToSignedVideo(cfg: ApiConfig, video: Video) {
-  if (!video.videoURL) {
-    return video;
-  }
-
-  video.videoURL = generatePresignedURL(cfg, video.videoURL, 3600);
-
-  return video;
 }
 
 export async function uploadVideoToS3(
